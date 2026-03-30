@@ -3,12 +3,11 @@ import requests
 import datetime
 from openai import OpenAI
 
-# ===================== 从 GitHub Secrets 自动读取 =====================
-# 读取 3 个密钥，代码里完全不暴露信息
-FEISHU_WEBHOOK_URL = os.getenv("FEISHU_WEBHOOK_URL")
+# ===================== Secrets 配置 =====================
+PUSHDEER_TOKEN = os.getenv("PUSHDEER_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-STOCK_LIST = os.getenv("STOCK_LIST").split("-")  # 自动按 - 分割股票
-# =====================================================================
+STOCK_LIST = os.getenv("STOCK_LIST").split("-")
+# ========================================================
 
 def is_trade_day():
     today = datetime.date.today().strftime("%Y%m%d")
@@ -39,19 +38,11 @@ def get_stock(code):
 
 def ai_analysis(stocks):
     client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-    prompt = f"""
-今天是{datetime.date.today()}，请对以下股票做简短专业分析：
-1.今日表现
-2.短期走势
-3.简要建议
-
-数据：
-"""
+    prompt = f"今天{datetime.date.today()}，分析以下A股，简要3点：今日表现、短期走势、简要建议。\n"
     for s in stocks:
         prompt += f"【{s['name']}】现价{s['now']}，涨跌幅{s['pct']}%\n"
-    
-    prompt += "\n语言简洁、分点、不啰嗦。"
-    
+    prompt += "语言简洁，分点。"
+
     res = client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
@@ -59,31 +50,23 @@ def ai_analysis(stocks):
     )
     return res.choices[0].message.content
 
-def send_feishu(msg):
-    requests.post(FEISHU_WEBHOOK_URL, json={
-        "msg_type": "text",
-        "content": {"text": msg}
-    }, timeout=10)
+def push_pushdeer(text):
+    url = f"https://api2.pushdeer.com/message/push?pushkey={PUSHDEER_TOKEN}&text={requests.utils.quote(text)}"
+    requests.get(url, timeout=10)
 
 if __name__ == "__main__":
     if not is_trade_day():
         print("非交易日")
-        exit()
+        return
 
-    # 获取所有股票数据
-    stocks = []
-    for code in STOCK_LIST:
-        stocks.append(get_stock(code))
+    stocks = [get_stock(code) for code in STOCK_LIST]
 
-    # 组装消息
-    msg = f"📈 A股实时提醒 {datetime.date.today()}\n\n"
+    msg = f"📈 A股实时推送 {datetime.date.today()}\n\n"
     for s in stocks:
         msg += f"【{s['name']}】{s['code']}\n现价：{s['now']}  涨跌：{s['pct']}%\n\n"
-    
-    # AI 分析
-    msg += "🤖 DeepSeek AI 分析：\n"
+
+    msg += "🤖 DeepSeek 分析：\n"
     msg += ai_analysis(stocks)
 
-    # 推送飞书
-    send_feishu(msg)
+    push_pushdeer(msg)
     print("推送成功")
