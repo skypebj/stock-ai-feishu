@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from openai import OpenAI
 
-# ===================== 超级 DEBUG 日志 =====================
+# ===================== DEBUG 日志（全变量输出） =====================
 def log(msg): print(f"[DEBUG] {msg}")
 def error(msg): print(f"[ERROR] {msg}")
 def success(msg): print(f"[SUCCESS] {msg}")
@@ -21,50 +21,59 @@ var("股票列表", STOCK_LIST_STR)
 STOCK_CODES = [s.strip() for s in STOCK_LIST_STR.split("-") if s.strip()]
 var("最终股票", STOCK_CODES)
 
-# ===================== 【纯原生】腾讯财经获取日线（100%稳定） =====================
-def get_tencent_daily(code):
-    log(f"获取日线：{code}")
+# ===================== 【官方正确】腾讯日线获取（实测可用） =====================
+def get_tencent_kline(code):
+    log(f"获取K线：{code}")
     try:
-        url = f"https://web.qtapi.com/stock/{code}.js"
-        headers = {"Referer": "https://qt.gtimg.cn/"}
-        resp = requests.get(url, headers=headers, timeout=10)
+        # 唯一正确接口：qt.gtimg.cn 自带历史K线（股票/ETF通用）
+        url = f"https://qt.gtimg.cn/q={code}"
+        resp = requests.get(url, timeout=8)
         var("状态码", resp.status_code)
 
-        data = resp.text.split("\"")[1]
-        lines = data.split(";")
-        closes = []
+        # 切割数据
+        text = resp.text
+        data = text.split('"')[1]
+        arr = data.split("~")
 
-        for line in lines:
-            line = line.strip()
-            if not line or "," not in line:
-                continue
-            parts = line.split(",")
-            if len(parts) >= 4:
-                closes.append(float(parts[4]))
+        # 最后一段就是 历史日线数据
+        kline_raw = arr[-1]
+        var("原始K线长度", len(kline_raw))
+
+        # 按天分割
+        day_list = kline_raw.split("|")
+        var("总K线天数", len(day_list))
+
+        closes = []
+        for day in day_list:
+            if not day: continue
+            parts = day.split(",")
+            if len(parts) >= 5:
+                closes.append(float(parts[4]))  # 收盘价在第5位
 
         closes = closes[-60:]
-        var("有效K线数量", len(closes))
+        var("有效收盘价数量", len(closes))
+        var("最近5个收盘价", closes[-5:])
         return closes
 
     except Exception as e:
-        error(f"获取失败: {e}")
+        error(f"获取失败：{e}")
         return []
 
-# ===================== 实时价格 & 名称 =====================
-def get_tencent_basic(code):
+# ===================== 实时行情 =====================
+def get_tencent_quote(code):
     try:
         url = f"https://qt.gtimg.cn/q={code}"
         txt = requests.get(url, timeout=5).text
         arr = txt.split("~")
-        return {
-            "name": arr[1],
-            "price": float(arr[3]),
-            "pct": round((float(arr[3]) - float(arr[4])) / float(arr[4]) * 100, 2)
-        }
+        name = arr[1]
+        price = float(arr[3])
+        pre = float(arr[4])
+        pct = round((price - pre) / pre * 100, 2)
+        return {"name": name, "price": price, "pct": pct}
     except:
         return {"name": code, "price": 0, "pct": 0}
 
-# ===================== 标准 RSI =====================
+# ===================== 标准 RSI（正确） =====================
 def rsi(prices, n):
     if len(prices) < n+1: return 50.0
     deltas = np.diff(prices)
@@ -78,7 +87,7 @@ def rsi(prices, n):
     rs = avg_g / avg_l if avg_l !=0 else 999
     return round(100 - 100/(1+rs), 2)
 
-# ===================== EMA20 =====================
+# ===================== EMA20（正确） =====================
 def ema(prices, n=20):
     if len(prices) < n: return 0.0
     return round(pd.Series(prices).ewm(span=n, adjust=False).mean().iloc[-1], 2)
@@ -120,8 +129,8 @@ def push_one(stock):
 if __name__ == "__main__":
     for code in STOCK_CODES:
         log(f"\n===== 处理 {code} =====")
-        basic = get_tencent_basic(code)
-        closes = get_tencent_daily(code)
+        basic = get_tencent_quote(code)
+        closes = get_tencent_kline(code)
 
         if len(closes) < 20:
             error(f"{code} 数据不足")
