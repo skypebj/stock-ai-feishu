@@ -25,7 +25,6 @@ try:
     
     log(f"PushDeer Token 已读取: {PUSHDEER_TOKEN is not None}")
     log(f"DeepSeek Key 已读取: {DEEPSEEK_API_KEY is not None}")
-    log(f"股票列表原始字符串: ***")
 except Exception as e:
     error(f"读取环境变量失败: {e}")
     sys.exit(1)
@@ -38,31 +37,32 @@ except Exception as e:
     error(f"分割股票失败: {e}")
     sys.exit(1)
 
-# ===================== 获取股票价格 =====================
+# ===================== 稳定获取股票价格（腾讯接口，不超时） =====================
 def get_stock(code):
     log(f"开始获取股票: {code}")
     try:
-        url = f"https://hq.sinajs.cn/list={code.lower()}"
-        res = requests.get(url, timeout=5)
-        log(f"{code} 接口状态码: {res.status_code}")
+        code_clean = code.replace(".SH", "").replace(".SZ", "")
+        market = "1" if code.endswith(".SH") else "0"
+        url = f"https://web.ifzq.gtimg.cn/realstock/quote/{market}{code_clean}.js"
         
-        arr = res.text.split('"')[1].split(",")
-        name = arr[0]
-        pre = float(arr[2])
-        now = float(arr[3])
-        pct = round((now - pre) / pre * 100, 2)
-        
-        success(f"{code} 获取成功: {name} {now}元 {pct}%")
+        resp = requests.get(url, timeout=15)
+        txt = resp.text
+        data = txt.split('"')[1].split("~")
+
+        name = data[1]
+        now = float(data[3])
+        close = float(data[4])
+        pct = round((now - close) / close * 100, 2)
+
+        success(f"{code} 获取成功: {name} | {now}元 | {pct}%")
         return {
             "name": name, "code": code,
             "now": now, "pct": pct
         }
+
     except Exception as e:
-        error(f"{code} 获取失败: {e}")
-        return {
-            "name": "获取失败", "code": code,
-            "now": 0, "pct": 0
-        }
+        error(f"{code} 获取失败: {str(e)}")
+        return {"name": "获取失败", "code": code, "now": 0, "pct": 0}
 
 # ===================== AI 分析 =====================
 def ai_analysis(stocks):
@@ -95,8 +95,8 @@ def push_pushdeer(text):
         import urllib.parse
         text_encoded = urllib.parse.quote(text)
         url = f"https://api2.pushdeer.com/message/push?pushkey={PUSHDEER_TOKEN}&text={text_encoded}"
-        resp = requests.get(url, timeout=10)
-        log(f"PushDeer 响应: {resp.status_code} {resp.text}")
+        resp = requests.get(url, timeout=15)
+        log(f"PushDeer 响应: {resp.status_code}")
         success("推送完成")
     except Exception as e:
         error(f"推送失败: {e}")
