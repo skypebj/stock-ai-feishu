@@ -49,7 +49,7 @@ def get_quote(code):
     except Exception as e:
         return {"name": code, "price": 0.0, "pct": 0.0}
 
-# ===================== AI 分析师（按你指定的提示词）=====================
+# ===================== AI 专业分析 =====================
 def ai_analyze(stock):
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
@@ -70,7 +70,7 @@ RSI6：{stock['rsi6']}
 RSI12：{stock['rsi12']}
 RSI24：{stock['rsi24']}
 EMA20：{stock['ema20']}
-总字数不超过150字"""
+输出不超过150字"""
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
@@ -87,20 +87,34 @@ EMA20：{stock['ema20']}
 def push_to_pushdeer(content):
     token = os.getenv("PUSHDEER_TOKEN")
     if not token:
-        print("PushDeer token 未配置")
+        print("ℹ PushDeer 未配置，跳过推送")
         return
     try:
-        url = f"https://api2.pushdeer.com/message/push"
-        params = {
-            "pushkey": token,
-            "text": content.encode("utf-8").decode("utf-8")
-        }
+        url = "https://api2.pushdeer.com/message/push"
+        params = {"pushkey": token, "text": content}
         requests.get(url, params=params, timeout=10)
-        print("PushDeer 推送成功")
+        print("✅ PushDeer 推送成功")
     except Exception as e:
-        print(f"PushDeer 推送失败：{e}")
+        print(f"❌ PushDeer 推送失败：{e}")
 
-# ===================== GitHub 日志输出（触发邮件）=====================
+# ===================== Server酱 推送 =====================
+def push_to_serverchan(content):
+    key = os.getenv("SERVERCHAN_KEY")
+    if not key:
+        print("ℹ Server酱 未配置，跳过推送")
+        return
+    try:
+        url = f"https://sctapi.ftqq.com/{key}.send"
+        data = {
+            "title": "📈 股票技术分析报告",
+            "desp": content
+        }
+        requests.post(url, data=data, timeout=10)
+        print("✅ Server酱 推送成功")
+    except Exception as e:
+        print(f"❌ Server酱 推送失败：{e}")
+
+# ===================== GitHub 日志输出 =====================
 def print_for_github_email(results):
     print("\n" + "="*60)
     print("📈 股票技术分析报告（GitHub 邮件通知）")
@@ -146,9 +160,12 @@ if __name__ == "__main__":
         stock["ai_analysis"] = ai_analyze(stock)
         results.append(stock)
 
-    # 输出到 GitHub 日志（邮件）
+    # 输出日志并获取完整内容
     full_content = print_for_github_email(results)
-    # PushDeer 推送完整报告
+
+    # 双平台推送
     push_to_pushdeer(full_content)
+    push_to_serverchan(full_content)
 
     bs.logout()
+    print("\n🎉 全部任务执行完成")
