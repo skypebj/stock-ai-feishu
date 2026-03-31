@@ -25,7 +25,7 @@ try:
     
     log(f"PushDeer Token 已读取: {PUSHDEER_TOKEN is not None}")
     log(f"DeepSeek Key 已读取: {DEEPSEEK_API_KEY is not None}")
-    log(f"股票列表原始字符串: {STOCK_LIST_STR}")
+    log(f"股票列表原始字符串: ***")
 except Exception as e:
     error(f"读取环境变量失败: {e}")
     sys.exit(1)
@@ -37,28 +37,6 @@ try:
 except Exception as e:
     error(f"分割股票失败: {e}")
     sys.exit(1)
-
-# ===================== 交易日判断 =====================
-def is_trade_day():
-    log("开始判断是否为交易日")
-    try:
-        today = datetime.date.today().strftime("%Y%m%d")
-        log(f"今日日期: {today}")
-        
-        resp = requests.get("https://api.apihubs.cn/holiday/get", timeout=10)
-        log(f"交易日历接口状态码: {resp.status_code}")
-        
-        data = resp.json()
-        for d in data.get("data", {}).get("list", []):
-            if d.get("date") == today:
-                res = d.get("workday") == 1
-                log(f"交易日结果: {res}")
-                return res
-        log("未找到今日日期记录，默认非交易日")
-        return False
-    except Exception as e:
-        error(f"交易日判断失败: {e}")
-        return False
 
 # ===================== 获取股票价格 =====================
 def get_stock(code):
@@ -125,11 +103,7 @@ def push_pushdeer(text):
 
 # ===================== 主流程 =====================
 if __name__ == "__main__":
-    log("进入主流程")
-    
-    if not is_trade_day():
-        log("今日非交易日，程序退出")
-        sys.exit(0)
+    log("进入主流程（已关闭交易日判断，每日直接执行）")
     
     stocks = [get_stock(code) for code in STOCK_LIST]
     log(f"成功获取 {len(stocks)} 只股票")
