@@ -1,12 +1,12 @@
 import os
 import sys
-import requests
 import datetime
 import numpy as np
 import pandas as pd
+import akshare as ak
 from openai import OpenAI
 
-# ===================== 超级日志 =====================
+# ===================== 超级 DEBUG 日志（变量全打印） =====================
 def log(msg):
     print(f"[DEBUG] {msg}")
 
@@ -25,223 +25,133 @@ PUSHDEER_TOKEN = os.getenv("PUSHDEER_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 STOCK_LIST_STR = os.getenv("STOCK_LIST", "")
 
-var("PUSHDEER_TOKEN 是否存在", PUSHDEER_TOKEN is not None)
-var("DEEPSEEK_API_KEY 是否存在", DEEPSEEK_API_KEY is not None)
-var("原始股票字符串", STOCK_LIST_STR)
-
+var("股票原始字符串", STOCK_LIST_STR)
 STOCK_CODES = [s.strip() for s in STOCK_LIST_STR.split("-") if s.strip()]
-var("分割后股票列表", STOCK_CODES)
+var("最终股票列表", STOCK_CODES)
 
-# ===================== 1. 统一用 qt.gtimg.cn 获取日线（收盘价序列） =====================
-def get_daily_closes_from_qt(code, days=60):
-    log(f"--- 从 qt.gtimg.cn 获取 {code} 日线（最近{days}天）---")
+# ===================== AKShare 获取日线（标准、稳定） =====================
+def get_ak_daily(code):
+    log(f"--- AKShare 获取日线：{code} ---")
     try:
-        # 统一接口：https://qt.gtimg.cn/q=sh513100
-        url = f"https://qt.gtimg.cn/q={code}"
-        var("请求URL", url)
+        # 转换代码：sh601328 → 601328.SH
+        symbol = code[2:] + "." + code[:2].upper()
+        var("akshare 标准代码", symbol)
 
-        resp = requests.get(url, timeout=12)
-        var("HTTP状态码", resp.status_code)
-        var("返回内容长度", len(resp.text))
+        # 获取日线（前复权）
+        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq")
+        var("获取K线行数", len(df))
+        var("最近K线", df[["收盘"]].tail(10).to_string())
 
-        # 解析格式：v_sh513100="...~收盘价~昨收~开盘~...~历史K线~..."
-        # 历史K线部分格式：日期1,开盘,最高,最低,收盘,成交量|日期2,开盘,最高,最低,收盘,成交量|...
-        content = resp.text.strip()
-        if not content.startswith(f"v_{code}="):
-            error(f"返回格式异常，非 {code} 数据")
-            return []
-
-        # 提取引号内内容
-        data_str = content.split('"')[1]
-        parts = data_str.split("~")
-        var("字段总数", len(parts))
-
-        # 历史K线在最后一个字段（索引-1）
-        kline_str = parts[-1]
-        var("原始K线字符串长度", len(kline_str))
-        if not kline_str:
-            error("无历史K线数据")
-            return []
-
-        # 按 | 分割每天数据
-        daily_lines = kline_str.split("|")
-        var("K线总天数", len(daily_lines))
-
-        closes = []
-        for i, line in enumerate(daily_lines):
-            if not line:
-                continue
-            # 格式：日期,开盘,最高,最低,收盘,成交量
-            fields = line.split(",")
-            if len(fields) >= 5:
-                try:
-                    close_val = float(fields[4])
-                    closes.append(close_val)
-                    if i < 10:
-                        var(f"第{i}天收盘价", close_val)
-                except ValueError as e:
-                    var(f"解析失败行 {i}", line)
-                    continue
-
-        # 取最近 days 天
-        closes = closes[-days:]
-        var("最终有效收盘价数量", len(closes))
-        var("最近10个收盘价", closes[-10:])
-        return closes
+        closes = df["收盘"].tolist()
+        return closes[-60:]  # 取最近60日
 
     except Exception as e:
-        error(f"获取日线失败: {e}")
+        error(f"AKShare 获取失败：{e}")
         return []
 
-# ===================== 2. 实时行情（名称、价格、涨跌幅） =====================
-def get_basic(code):
-    log(f"--- 获取实时行情 {code} ---")
+# ===================== 实时名称 & 价格 =====================
+def get_ak_basic(code):
     try:
-        url = f"https://qt.gtimg.cn/q={code}"
-        resp = requests.get(url, timeout=6)
-        content = resp.text.strip()
-        data_str = content.split('"')[1]
-        parts = data_str.split("~")
+        symbol = code[2:] + "." + code[:2].upper()
+        df = ak.stock_zh_a_spot_em(symbol=symbol)
+        name = df.iloc[0]["名称"]
+        price = df.iloc[0]["最新"]
+        pct = df.iloc[0]["涨跌幅"]
+        return {"name": name, "price": round(price,2), "pct": round(pct,2)}
+    except:
+        return {"name": code, "price":0, "pct":0}
 
-        name = parts[1]
-        price = float(parts[3])
-        pre_close = float(parts[4])
-        pct = round((price - pre_close) / pre_close * 100, 2)
-
-        var("股票名称", name)
-        var("当前价", price)
-        var("昨收价", pre_close)
-        var("涨跌幅", pct)
-        return {"name": name, "price": price, "pct": pct}
-    except Exception as e:
-        error(f"获取实时行情失败: {e}")
-        return {"name": code, "price": 0.0, "pct": 0.0}
-
-# ===================== 3. 标准 RSI 计算（带步骤打印） =====================
-def rsi(prices, period):
-    log(f"--- 计算 RSI({period}) ---")
-    var("输入K线数量", len(prices))
-    var("周期", period)
-
-    if len(prices) < period + 1:
-        log("数据不足，返回默认 50")
-        return 50.0
+# ===================== 标准 RSI（Wilder 算法） =====================
+def rsi(prices, n):
+    log(f"--- 计算 RSI({n}) ---")
+    var("K线数量", len(prices))
+    if len(prices) < n+1: return 50.0
 
     deltas = np.diff(prices)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
+    gains = np.where(deltas>0, deltas, 0)
+    losses = np.where(deltas<0, -deltas, 0)
 
-    var("deltas（价格变化）", deltas[:10])
-    var("gains（上涨）", gains[:10])
-    var("losses（下跌）", losses[:10])
+    avg_g = np.mean(gains[:n])
+    avg_l = np.mean(losses[:n])
+    for i in range(n, len(gains)):
+        avg_g = (avg_g*(n-1)+gains[i])/n
+        avg_l = (avg_l*(n-1)+losses[i])/n
 
-    avg_g = np.mean(gains[:period])
-    avg_l = np.mean(losses[:period])
-    var("初始avg_gain", avg_g)
-    var("初始avg_loss", avg_l)
+    rs = avg_g/avg_l if avg_l !=0 else 999
+    res = 100 - 100/(1+rs)
+    var(f"RSI({n})", round(res,2))
+    return round(res,2)
 
-    for i in range(period, len(gains)):
-        avg_g = (avg_g * (period - 1) + gains[i]) / period
-        avg_l = (avg_l * (period - 1) + losses[i]) / period
-
-    var("最终avg_gain", avg_g)
-    var("最终avg_loss", avg_l)
-
-    if avg_l == 0:
-        var("RSI结果", 100.0)
-        return 100.0
-
-    rs = avg_g / avg_l
-    rsi_val = 100.0 - (100.0 / (1.0 + rs))
-    var("RS", rs)
-    var("RSI结果", round(rsi_val, 2))
-
-    return round(rsi_val, 2)
-
-# ===================== 4. EMA20 计算（带步骤打印） =====================
+# ===================== EMA20 =====================
 def ema(prices, n=20):
-    log(f"--- 计算 EMA({n}) ---")
-    var("输入K线数量", len(prices))
-    var("周期", n)
+    if len(prices)<n: return 0.0
+    return round(pd.Series(prices).ewm(span=n, adjust=False).mean().iloc[-1], 2)
 
-    if len(prices) < n:
-        log("数据不足，返回 0")
-        return 0.0
-
-    ema_series = pd.Series(prices).ewm(span=n, adjust=False).mean()
-    ema_val = ema_series.iloc[-1]
-
-    var("最近3个EMA值", list(ema_series[-3:]))
-    var("最终EMA结果", round(ema_val, 2))
-    return round(ema_val, 2)
-
-# ===================== 5. AI 分析 =====================
+# ===================== AI 分析（你指定的完整提示词） =====================
 def ai_analyze(stock):
-    log(f"--- AI 分析 {stock['code']} ---")
-    prompt = f"""请以资深股票技术分析师身份，对【{stock['name']} / {stock['code']}】进行技术面分析，重点聚焦价格位置、K线形态、量价关系、支撑压力、均线趋势，简要结合行业与政策环境，语言专业精炼，不构成投资建议。
-分析框架：股价区间、支撑压力、K线与均线、成交量、行业政策、技术观点+风险
-数据：价格{stock['price']}元，涨跌幅{stock['pct']}%，RSI6={stock['rsi6']}，RSI12={stock['rsi12']}，RSI24={stock['rsi24']}，EMA20={stock['ema20']}"""
+    prompt = f"""请以资深股票技术分析师身份，对【{stock['name']} / {stock['code']}】进行技术面分析，重点聚焦价格位置、K 线形态、量价关系、支撑压力、均线趋势，简要结合行业与政策环境，语言专业精炼，不构成投资建议。
+分析框架：
+股价当前所处区间（高位/中位/低位），关键支撑位与压力位
+K 线形态、趋势结构、均线系统表现
+成交量配合情况
+行业景气度及相关政策简要影响
+技术面观点 + 风险提示
 
+数据：价格={stock['price']} 涨跌幅={stock['pct']}% RSI6={stock['rsi6']} RSI12={stock['rsi12']} RSI24={stock['rsi24']} EMA20={stock['ema20']}
+"""
     try:
-        client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-        res = client.chat.completions.create(model="deepseek-chat", messages=[{"role":"user","content":prompt}], temperature=0.3)
-        return res.choices[0].message.content
-    except Exception as e:
-        return f"AI失败: {e}"
+        c = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+        return c.chat.completions.create(model="deepseek-chat", messages=[{"role":"user","content":prompt}], temperature=0.3).choices[0].message.content
+    except:
+        return "AI 分析暂时不可用"
 
-# ===================== 6. PushDeer 推送 + 完整回显 =====================
+# ===================== PushDeer 逐股推送（每条单独发） =====================
 def push_one(stock):
-    log(f"--- 推送 {stock['code']} ---")
-    msg = f"📈 个股技术指标 {datetime.date.today()}\n\n"
+    msg = f"📈 技术指标 {datetime.date.today()}\n\n"
     msg += f"【{stock['name']}】{stock['code']}\n"
-    msg += f"现价：{stock['price']} 元  {stock['pct']:+}%\n\n"
+    msg += f"现价：{stock['price']}  {stock['pct']:+}%\n\n"
     msg += f"RSI(6)  = {stock['rsi6']}\n"
     msg += f"RSI(12) = {stock['rsi12']}\n"
     msg += f"RSI(24) = {stock['rsi24']}\n"
     msg += f"EMA(20) = {stock['ema20']}\n\n"
     msg += f"🤖 技术分析：\n{ai_analyze(stock)}"
 
-    print("\n========================================")
-    print("【📌 即将推送到 PushDeer 的完整消息】")
-    print("========================================")
+    # 【回显推送内容】
+    print("\n=====================================")
+    print("【PushDeer 推送消息】")
+    print("=====================================")
     print(msg)
-    print("========================================\n")
+    print("=====================================\n")
 
-    try:
-        import urllib.parse
-        push_url = f"https://api2.pushdeer.com/message/push?pushkey={PUSHDEER_TOKEN}&text={urllib.parse.quote(msg)}"
-        requests.get(push_url, timeout=10)
-        success(f"{stock['code']} 推送成功")
-    except Exception as e:
-        error(f"推送失败: {e}")
+    import urllib.parse
+    url = f"https://api2.pushdeer.com/message/push?pushkey={PUSHDEER_TOKEN}&text={urllib.parse.quote(msg)}"
+    import requests
+    requests.get(url, timeout=10)
+    success(f"{stock['code']} 推送完成")
 
 # ===================== 主程序 =====================
 if __name__ == "__main__":
-    log("========== 开始执行 ==========")
     for code in STOCK_CODES:
-        log(f"\n\n##############################")
-        log(f"处理股票：{code}")
-        log(f"##############################")
-
-        basic = get_basic(code)
-        closes = get_daily_closes_from_qt(code, days=60)
+        log(f"\n===== 处理 {code} =====")
+        basic = get_ak_basic(code)
+        closes = get_ak_daily(code)
 
         if len(closes) < 30:
-            error(f"{code} 数据不足，跳过")
+            error(f"{code} 数据不足")
             continue
 
         stock = {
             "code": code,
             "name": basic["name"],
-            "price": round(basic["price"], 2),
+            "price": basic["price"],
             "pct": basic["pct"],
-            "rsi6": rsi(closes, 6),
-            "rsi12": rsi(closes, 12),
-            "rsi24": rsi(closes, 24),
-            "ema20": ema(closes, 20)
+            "rsi6": rsi(closes,6),
+            "rsi12": rsi(closes,12),
+            "rsi24": rsi(closes,24),
+            "ema20": ema(closes,20)
         }
 
-        var("最终股票对象", stock)
+        var("最终股票数据", stock)
         push_one(stock)
 
-    log("========== 全部执行完成 ==========")
+    log("========== 全部完成 ==========")
