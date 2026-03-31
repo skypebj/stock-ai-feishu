@@ -2,9 +2,11 @@ import os
 import sys
 import requests
 import datetime
+import pandas as pd
+import numpy as np
 from openai import OpenAI
 
-# ===================== 日志输出函数 =====================
+# ===================== 日志输出 =====================
 def log(message):
     print(f"[LOG] {message}")
 
@@ -37,56 +39,141 @@ except Exception as e:
     error(f"分割股票失败: {e}")
     sys.exit(1)
 
-# ===================== 稳定获取股票价格（腾讯接口，不超时） =====================
-def get_stock(code):
-    log(f"开始获取股票: {code}")
+# ===================== 从 data.gtimg.cn 获取日K数据 =====================
+def get_daily_k(code):
+    """
+    从 data.gtimg.cn 获取日K线（前复权）
+    返回: DataFrame[date, open, high, low, close, volume]
+    """
+    log(f"开始获取 {code} 日K数据")
     try:
-        code_clean = code.replace(".SH", "").replace(".SZ", "")
-        market = "1" if code.endswith(".SH") else "0"
-        url = f"https://web.ifzq.gtimg.cn/realstock/quote/{market}{code_clean}.js"
+        # 转换为接口格式：sh601328 / sz513100
+        code_low = code.lower()
+        market = code_low[:2]
+        symbol = code_low[2:]
+        url = f"https://data.gtimg.cn/flashdata/hushen/daily/{market}/{code_low}.js"
         
         resp = requests.get(url, timeout=15)
-        txt = resp.text
-        data = txt.split('"')[1].split("~")
-
-        name = data[1]
-        now = float(data[3])
-        close = float(data[4])
-        pct = round((now - close) / close * 100, 2)
-
-        success(f"{code} 获取成功: {name} | {now}元 | {pct}%")
-        return {
-            "name": name, "code": code,
-            "now": now, "pct": pct
-        }
-
+        txt = resp.text.strip()
+        # 提取数据部分
+        data_str = txt.split('="')[1].split('";')[0]
+        # 按换行分割
+        lines = data_str.split('\n')
+        data = []
+        for line in lines:
+            if not line:
+                continue
+            # 格式: year:'2026',month:'3',day:'31',open:'5.67',high:'5.69',low:'5.65',close:'5.67',volume:'12345678'
+            items = line.replace("'", "").split(',')
+            row = {}
+            for item in items:
+                k, v = item.split(':')
+                row[k] = v
+            # 构造日期
+            date = f"{row['year']}-{row['month'].zfill(2)}-{row['day'].zfill(2)}"
+            data.append({
+                "date": date,
+                "open": float(row['open']),
+                "high": float(row['high']),
+                "low": float(row['low']),
+                "close": float(row['close']),
+                "volume": float(row['volume'])
+            })
+        df = pd.DataFrame(data)
+        df = df.sort_values("date").reset_index(drop=True)
+        success(f"{code} 日K获取成功，共 {len(df)} 条")
+        return df
     except Exception as e:
-        error(f"{code} 获取失败: {str(e)}")
-        return {"name": "获取失败", "code": code, "now": 0, "pct": 0}
+        error(f"{code} 日K获取失败: {str(e)}")
+        return pd.DataFrame()
 
-# ===================== AI 分析 =====================
-def ai_analysis(stocks):
-    log("开始调用 DeepSeek AI 分析")
+# ===================== 计算 RSI(6,12,24) =====================
+def calc_rsi(close_series, window):
+    """计算单周期RSI"""
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.rolling(window=window, min_periods=1).mean()
+    avg_loss = loss.rolling(window=window, min_periods=1).mean()
+    
+    # 避免除零
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = rs.fillna(0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.round(2)
+
+# ===================== 计算 EMA(20) =====================
+def calc_ema(close_series, window=20):
+    """计算EMA"""
+    return close_series.ewm(span=window, adjust=False).mean().round(2)
+
+# ===================== 获取股票完整数据（价格+指标） =====================
+def get_stock_data(code):
+    log(f"开始处理 {code}")
+    df = get_daily_k(code)
+    if df.empty:
+        return None
+    
+    # 计算指标
+    close = df["close"]
+    df["rsi6"] = calc_rsi(close, 6)
+    df["rsi12"] = calc_rsi(close, 12)
+    df["rsi24"] = calc_rsi(close, 24)
+    df["ema20"] = calc_ema(close, 20)
+    
+    # 取最新数据
+    latest = df.iloc[-1]
+    prev = df.iloc[-2] if len(df)>=2 else latest
+    
+    result = {
+        "code": code,
+        "name": code,  # 可从实时接口补充，此处简化
+        "date": latest["date"],
+        "close": latest["close"],
+        "rsi6": latest["rsi6"],
+        "rsi12": latest["rsi12"],
+        "rsi24": latest["rsi24"],
+        "ema20": latest["ema20"],
+        "prev_close": prev["close"],
+        "pct": round((latest["close"] - prev["close"]) / prev["close"] * 100, 2)
+    }
+    success(f"{code} 指标计算完成")
+    return result
+
+# ===================== AI 技术面分析（按你给的提示词） =====================
+def ai_tech_analysis(stock):
+    log(f"开始AI分析 {stock['code']}")
     if not DEEPSEEK_API_KEY:
         error("DeepSeek API Key 为空")
         return "未配置 DeepSeek Key"
     
+    prompt = f"""请以资深股票技术分析师身份，对【{stock['name']} / {stock['code']}】进行技术面分析，重点聚焦价格位置、K线形态、量价关系、支撑压力、均线趋势，简要结合行业与政策环境，语言专业精炼，不构成投资建议。
+分析框架：
+1. 股价当前所处区间（高位/中位/低位），关键支撑位与压力位
+2. K线形态、趋势结构、均线系统表现（EMA20={stock['ema20']}）
+3. 成交量配合情况
+4. 行业景气度及相关政策简要影响
+5. 技术面观点 + 风险提示
+
+当前数据：
+收盘价：{stock['close']} 元，涨跌幅：{stock['pct']}%
+RSI(6)={stock['rsi6']}，RSI(12)={stock['rsi12']}，RSI(24)={stock['rsi24']}
+EMA(20)={stock['ema20']}
+"""
     try:
         client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
-        prompt = f"今天{datetime.date.today()}，分析以下A股，3点：今日表现、短期走势、操作建议。简洁分点。\n"
-        for s in stocks:
-            prompt += f"【{s['name']}】{s['code']} 现价{s['now']} 涨跌幅{s['pct']}%\n"
-        
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
+            temperature=0.3,
+            max_tokens=800
         )
-        success("AI 分析完成")
+        success(f"{stock['code']} AI分析完成")
         return response.choices[0].message.content
     except Exception as e:
-        error(f"AI 分析失败: {e}")
-        return f"AI 分析异常: {str(e)}"
+        error(f"AI分析失败: {e}")
+        return f"AI分析异常: {str(e)}"
 
 # ===================== PushDeer 推送 =====================
 def push_pushdeer(text):
@@ -103,18 +190,29 @@ def push_pushdeer(text):
 
 # ===================== 主流程 =====================
 if __name__ == "__main__":
-    log("进入主流程（已关闭交易日判断，每日直接执行）")
+    log("进入主流程（每日 9:00/13:30/14:50 执行）")
     
-    stocks = [get_stock(code) for code in STOCK_LIST]
-    log(f"成功获取 {len(stocks)} 只股票")
+    all_stocks = []
+    for code in STOCK_LIST:
+        data = get_stock_data(code)
+        if data:
+            all_stocks.append(data)
     
-    msg = f"📈 A股实时推送 {datetime.date.today()}\n\n"
-    for s in stocks:
-        msg += f"【{s['name']}】{s['code']}\n现价：{s['now']}  涨跌：{s['pct']}%\n\n"
+    if not all_stocks:
+        error("无有效股票数据，程序退出")
+        sys.exit(1)
     
-    msg += "🤖 DeepSeek 分析：\n"
-    msg += ai_analysis(stocks)
+    # 构造推送内容
+    msg = f"📈 股票技术指标推送 {datetime.date.today()}\n\n"
+    for s in all_stocks:
+        msg += f"【{s['code']}】{s['date']}\n"
+        msg += f"现价：{s['close']} 元 | 涨跌幅：{s['pct']}%\n"
+        msg += f"RSI(6)：{s['rsi6']} | RSI(12)：{s['rsi12']} | RSI(24)：{s['rsi24']}\n"
+        msg += f"EMA(20)：{s['ema20']}\n\n"
+        # AI分析
+        ai_result = ai_tech_analysis(s)
+        msg += f"🤖 技术面分析：\n{ai_result}\n\n"
+        msg += "----------------------------------------\n\n"
     
     push_pushdeer(msg)
-    
     log("========== 程序全部执行成功 ==========")
