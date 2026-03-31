@@ -32,45 +32,92 @@ var("原始股票字符串", STOCK_LIST_STR)
 STOCK_CODES = [s.strip() for s in STOCK_LIST_STR.split("-") if s.strip()]
 var("分割后股票列表", STOCK_CODES)
 
-# ===================== 1. 获取日线收盘价 =====================
-def get_daily_closes(code):
-    log(f"--- 开始获取 {code} 日线数据 ---")
+# ===================== 1. 统一用 qt.gtimg.cn 获取日线（收盘价序列） =====================
+def get_daily_closes_from_qt(code, days=60):
+    log(f"--- 从 qt.gtimg.cn 获取 {code} 日线（最近{days}天）---")
     try:
-        url = f"https://data.gtimg.cn/flashdata/hushen/daily/{code[:2]}/{code}.js"
+        # 统一接口：https://qt.gtimg.cn/q=sh513100
+        url = f"https://qt.gtimg.cn/q={code}"
         var("请求URL", url)
 
         resp = requests.get(url, timeout=12)
         var("HTTP状态码", resp.status_code)
         var("返回内容长度", len(resp.text))
 
-        data_part = resp.text.split('"')[1]
-        lines = data_part.split("\\n")
-        var("K线总行数", len(lines))
+        # 解析格式：v_sh513100="...~收盘价~昨收~开盘~...~历史K线~..."
+        # 历史K线部分格式：日期1,开盘,最高,最低,收盘,成交量|日期2,开盘,最高,最低,收盘,成交量|...
+        content = resp.text.strip()
+        if not content.startswith(f"v_{code}="):
+            error(f"返回格式异常，非 {code} 数据")
+            return []
+
+        # 提取引号内内容
+        data_str = content.split('"')[1]
+        parts = data_str.split("~")
+        var("字段总数", len(parts))
+
+        # 历史K线在最后一个字段（索引-1）
+        kline_str = parts[-1]
+        var("原始K线字符串长度", len(kline_str))
+        if not kline_str:
+            error("无历史K线数据")
+            return []
+
+        # 按 | 分割每天数据
+        daily_lines = kline_str.split("|")
+        var("K线总天数", len(daily_lines))
 
         closes = []
-        for i, line in enumerate(lines):
-            line = line.strip()
-            if not line or line.startswith("#"):
+        for i, line in enumerate(daily_lines):
+            if not line:
                 continue
-            parts = line.split()
-            if len(parts) >= 4:
+            # 格式：日期,开盘,最高,最低,收盘,成交量
+            fields = line.split(",")
+            if len(fields) >= 5:
                 try:
-                    close_val = float(parts[3])
+                    close_val = float(fields[4])
                     closes.append(close_val)
                     if i < 10:
-                        var(f"第{i}条收盘价", close_val)
-                except:
+                        var(f"第{i}天收盘价", close_val)
+                except ValueError as e:
+                    var(f"解析失败行 {i}", line)
                     continue
 
+        # 取最近 days 天
+        closes = closes[-days:]
         var("最终有效收盘价数量", len(closes))
         var("最近10个收盘价", closes[-10:])
-        return closes[-60:]
+        return closes
 
     except Exception as e:
-        error(f"获取K线失败: {e}")
+        error(f"获取日线失败: {e}")
         return []
 
-# ===================== 2. 标准 RSI 计算（带步骤打印） =====================
+# ===================== 2. 实时行情（名称、价格、涨跌幅） =====================
+def get_basic(code):
+    log(f"--- 获取实时行情 {code} ---")
+    try:
+        url = f"https://qt.gtimg.cn/q={code}"
+        resp = requests.get(url, timeout=6)
+        content = resp.text.strip()
+        data_str = content.split('"')[1]
+        parts = data_str.split("~")
+
+        name = parts[1]
+        price = float(parts[3])
+        pre_close = float(parts[4])
+        pct = round((price - pre_close) / pre_close * 100, 2)
+
+        var("股票名称", name)
+        var("当前价", price)
+        var("昨收价", pre_close)
+        var("涨跌幅", pct)
+        return {"name": name, "price": price, "pct": pct}
+    except Exception as e:
+        error(f"获取实时行情失败: {e}")
+        return {"name": code, "price": 0.0, "pct": 0.0}
+
+# ===================== 3. 标准 RSI 计算（带步骤打印） =====================
 def rsi(prices, period):
     log(f"--- 计算 RSI({period}) ---")
     var("输入K线数量", len(prices))
@@ -111,7 +158,7 @@ def rsi(prices, period):
 
     return round(rsi_val, 2)
 
-# ===================== 3. EMA20 计算（带步骤打印） =====================
+# ===================== 4. EMA20 计算（带步骤打印） =====================
 def ema(prices, n=20):
     log(f"--- 计算 EMA({n}) ---")
     var("输入K线数量", len(prices))
@@ -126,33 +173,12 @@ def ema(prices, n=20):
 
     var("最近3个EMA值", list(ema_series[-3:]))
     var("最终EMA结果", round(ema_val, 2))
-
     return round(ema_val, 2)
-
-# ===================== 4. 实时价格名称 =====================
-def get_basic(code):
-    log(f"--- 获取实时价格 {code} ---")
-    try:
-        url = f"https://qt.gtimg.cn/q={code}"
-        arr = requests.get(url, timeout=6).text.split("~")
-        name = arr[1]
-        price = float(arr[3])
-        pre = float(arr[4])
-        pct = round((price - pre) / pre * 100, 2)
-
-        var("股票名称", name)
-        var("当前价", price)
-        var("昨收价", pre)
-        var("涨跌幅", pct)
-        return {"name": name, "price": price, "pct": pct}
-    except Exception as e:
-        error(f"获取实时价格失败: {e}")
-        return {"name": code, "price": 0.0, "pct": 0.0}
 
 # ===================== 5. AI 分析 =====================
 def ai_analyze(stock):
     log(f"--- AI 分析 {stock['code']} ---")
-    prompt = f"""请以资深股票技术分析师身份，对【{stock['name']} / {stock['code']}】进行技术面分析，重点聚焦价格位置、K 线形态、量价关系、支撑压力、均线趋势，简要结合行业与政策环境，语言专业精炼，不构成投资建议。
+    prompt = f"""请以资深股票技术分析师身份，对【{stock['name']} / {stock['code']}】进行技术面分析，重点聚焦价格位置、K线形态、量价关系、支撑压力、均线趋势，简要结合行业与政策环境，语言专业精炼，不构成投资建议。
 分析框架：股价区间、支撑压力、K线与均线、成交量、行业政策、技术观点+风险
 数据：价格{stock['price']}元，涨跌幅{stock['pct']}%，RSI6={stock['rsi6']}，RSI12={stock['rsi12']}，RSI24={stock['rsi24']}，EMA20={stock['ema20']}"""
 
@@ -163,7 +189,7 @@ def ai_analyze(stock):
     except Exception as e:
         return f"AI失败: {e}"
 
-# ===================== 6. PushDeer 单股推送 + 完整回显 =====================
+# ===================== 6. PushDeer 推送 + 完整回显 =====================
 def push_one(stock):
     log(f"--- 推送 {stock['code']} ---")
     msg = f"📈 个股技术指标 {datetime.date.today()}\n\n"
@@ -198,7 +224,7 @@ if __name__ == "__main__":
         log(f"##############################")
 
         basic = get_basic(code)
-        closes = get_daily_closes(code)
+        closes = get_daily_closes_from_qt(code, days=60)
 
         if len(closes) < 30:
             error(f"{code} 数据不足，跳过")
