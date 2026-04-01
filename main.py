@@ -70,7 +70,7 @@ RSI6：{stock['rsi6']}
 RSI12：{stock['rsi12']}
 RSI24：{stock['rsi24']}
 EMA20：{stock['ema20']}
-输出不超过150字"""
+输出不超过300字"""
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
         resp = client.chat.completions.create(
