@@ -3,21 +3,20 @@ name: 股票AI分析
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8 * * *'
+    - cron: '0 0 * * *'
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run
@@ -31,7 +30,7 @@ jobs:
           SERVERCHAN_KEY: ${{ secrets.SERVERCHAN_KEY }}
         run: python main.py
 
-      - name: Upload log
+      - name: Upload log file
         uses: actions/upload-artifact@v4
         with:
           name: stock-log
